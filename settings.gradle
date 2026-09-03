@@ -1,0 +1,7 @@
+// Gradle Java toolchain(languageVersion=25)이 로컬에 없는 JDK를 자동으로 내려받을 수 있게 해주는 리졸버.
+// 이게 없으면 build.gradle의 toolchain 설정은 로컬에 정확히 일치하는 JDK가 설치되어 있을 때만 동작한다.
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
+rootProject.name = 'CP_BOT'

@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: CP_BOT
+
+  # docker-compose.yml 로 띄운 로컬 Elasticsearch 연결 정보
+  elasticsearch:
+    uris: ${ELASTICSEARCH_URIS:http://localhost:9200}
+    connection-timeout: 5s
+    socket-timeout: 30s
+
+  ai:
+    google:
+      genai:
+        # Google AI Studio에서 발급받은 API Key. 절대 코드/설정 파일에 하드코딩 금지 - 환경변수로만 주입
+        api-key: ${GEMINI_API_KEY}
+        chat:
+          model: gemini-3.5-flash
+          temperature: 0.2 # 규정 Q&A는 창의적 답변보다 사실 일관성이 중요하므로 낮게 설정
+        embedding:
+          # Chat과 별개의 Spring AI 스타터이므로 api-key를 한 번 더 명시해야 함
+          api-key: ${GEMINI_API_KEY}
+          text:
+            model: gemini-embedding-001 # text-embedding-004는 2026-01-14부로 폐기(deprecated)됨. 사용 금지
+            task-type: RETRIEVAL_DOCUMENT
+            dimensions: 768 # MRL(Matryoshka) 지원 모델 - 아래 vectorstore.dimensions 값과 반드시 일치시킬 것
+
+    vectorstore:
+      elasticsearch:
+        index-name: company-policy-index
+        # Phase 2에서 RBAC 메타데이터(readableRoles 등)를 포함한 커스텀 매핑으로 인덱스를 직접 생성할 예정이므로
+        # 자동 스키마 초기화는 끔. 인덱스가 없으면 애플리케이션이 아니라 별도 초기화 스크립트로 생성한다.
+        initialize-schema: false
+        dimensions: 768 # embedding.text.dimensions 값과 반드시 동일해야 함
+        similarity: cosine
+
+server:
+  port: 8080
+
+logging:
+  level:
+    org.springframework.ai: DEBUG # 개발 중 프롬프트/응답 확인용. 운영 배포 전에 INFO 이하로 낮출 것
+    com.sunjin.CP_BOT: DEBUG
