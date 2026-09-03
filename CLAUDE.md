@@ -33,9 +33,48 @@ WebSearch/WebFetch로 재확인한다. 기억이나 과거 세션의 값을 그�
 ## 단계별 개발 계획 및 현재 상태
 
 - [x] **Phase 1: 인프라/프로젝트 세팅** - `docker-compose.yml`, `build.gradle`, `application.yml` 완료
-- [ ] **Phase 2: 문서 Ingestion 파이프라인** - PDF 파싱(Apache PDFBox 예정) → Chunking → 임베딩 → ES 적재
+- [x] **Phase 2: 문서 Ingestion 파이프라인** - `POST /api/documents` (PDF 업로드 → 페이지 분리 → Chunking → Gemini 임베딩 → ES bulk 적재)
 - [ ] **Phase 3: 하이브리드 검색 및 RBAC 필터링** - ES RRF retriever(BM25 + kNN) + 사전 권한 필터
 - [ ] **Phase 4: RAG 채팅 API** - Spring AI `QuestionAnswerAdvisor`/`RetrievalAugmentationAdvisor` 기반 프롬프트 조합
+
+### Phase 2 설계 메모
+
+- PDF 파싱은 (원래 계획했던 raw PDFBox 대신) Spring AI의 `spring-ai-pdf-document-reader`
+  (`PagePdfDocumentReader` + `TokenTextSplitter`, 패키지 `org.springframework.ai.reader.pdf` /
+  `org.springframework.ai.transformer.splitter`)를 사용한다. Spring AI ETL 파이프라인과 메타데이터
+  처리(페이지 번호 등)를 그대로 활용할 수 있어 raw PDFBox보다 적은 코드로 동일한 결과를 얻는다.
+- **`Document.metadata`는 String/int/float/boolean만 허용**하고 배열을 지원하지 않는다(Spring AI 공식 문서).
+  그래서 RBAC용 `allowed_roles`(List)는 `Document`에 담지 않고, `DocumentIngestionService`가
+  Elasticsearch로 보낼 최종 `Map<String,Object>`을 조립하는 시점에 직접 추가한다
+  (`DocumentIngestionService.toElasticsearchDocument()` 참고). `vectorStore.add()`를 쓰지 않고
+  `EmbeddingModel.embed()` + `ElasticsearchClient.bulk()`로 직접 색인하는 이유이기도 하다 -
+  Phase 3의 RRF 하이브리드 검색도 결국 저수준 클라이언트가 필요해서 read/write 경로가 일관된다.
+- ES 인덱스는 `initialize-schema: false`로 자동 생성을 끄고, `ElasticsearchIndexInitializer`
+  (`ApplicationRunner`)가 `elasticsearch/company-policy-index-mapping.json`으로 커스텀 매핑을 생성한다.
+  이 매핑에는 한국어 BM25 품질을 위한 `nori` 분석기(`korean_nori_analyzer`)가 포함되어 있고,
+  이를 위해 `docker/elasticsearch/Dockerfile`에서 `analysis-nori` 플러그인을 설치한 커스텀 ES 이미지를 빌드한다
+  (`docker-compose.yml`의 `elasticsearch` 서비스가 `image:` 대신 `build:`를 사용하도록 변경됨).
+- `dense_vector.dims`(매핑 JSON, 현재 768)와 `application.yml`의 `spring.ai.google.genai.embedding.text.dimensions` /
+  `spring.ai.vectorstore.elasticsearch.dimensions` 세 값은 반드시 동일해야 한다. 하나라도 바꾸면 셋 다 같이 바꿀 것.
+- **`SecurityConfig`는 임시로 모든 요청을 허용**한다 (`spring-boot-starter-security`가 있으면 기본적으로
+  전 요청이 인증을 요구해서 로컬 테스트가 불가능하기 때문). Phase 3에서 실제 인증/인가로 반드시 교체해야 하며,
+  이 상태로 배포하면 안 된다.
+- `server.error.include-stacktrace: never`를 설정해도 **로컬 `bootRun`에서는 스택트레이스가 계속 노출된다.**
+  `spring-boot-devtools`(developmentOnly 의존성)가 개발 편의를 위해 이 값을 강제로 `always`로 덮어쓰기 때문이며,
+  devtools가 빠지는 실제 운영 빌드(`bootJar`)에서는 설정한 대로 `never`가 적용된다. 버그 아님 - 재확인하느라 시간 쓰지 말 것.
+- Gemini 임베딩은 현재 `task-type: RETRIEVAL_DOCUMENT`로 전역 고정되어 있다. 이는 문서 적재(비대칭 임베딩의
+  document 쪽)에는 맞지만, Phase 4에서 사용자 질문을 임베딩할 때는 `RETRIEVAL_QUERY`가 검색 정확도상 더 적합하다.
+  Phase 4에서 질문 임베딩용 별도 설정/호출 경로가 필요한지 검토할 것.
+
+### Phase 2 사용법 (로컬)
+
+```bash
+curl -X POST http://localhost:8080/api/documents \
+  -F "file=@/path/to/규정.pdf" \
+  -F "documentTitle=휴가 규정" \
+  -F "category=인사" \
+  -F "allowedRoles=USER" -F "allowedRoles=ADMIN"
+```
 
 각 Phase는 사용자가 명시적으로 다음 단계를 요청할 때만 진행한다. 여러 Phase를 한 번에 앞서 구현하지 않는다.
 

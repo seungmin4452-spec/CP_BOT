@@ -2,6 +2,22 @@ spring:
   application:
     name: CP_BOT
 
+  # Spring AI가 자동 등록하는 ElasticsearchVectorStore 빈은 컨텍스트 기동 중(afterPropertiesSet)에
+  # 인덱스 존재 여부를 검사하는데, initialize-schema=false + 인덱스 최초 생성은 우리 ApplicationRunner
+  # (ElasticsearchIndexInitializer, ApplicationRunner는 컨텍스트 기동 "이후"에 실행됨)가 담당하다 보니
+  # 최초 기동 시 "Index not found"로 죽는다. 어차피 색인/검색을 VectorStore 빈이 아니라
+  # ElasticsearchClient를 직접 써서 구현하므로(회원사 규정상 RBAC 배열 메타데이터 때문, CLAUDE.md 참고)
+  # 이 자동설정 자체를 끈다.
+  autoconfigure:
+    exclude:
+      - org.springframework.ai.vectorstore.elasticsearch.autoconfigure.ElasticsearchVectorStoreAutoConfiguration
+
+  # 규정 PDF는 수십 페이지가 흔하므로 기본값(1MB)보다 넉넉하게 설정
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+
   # docker-compose.yml 로 띄운 로컬 Elasticsearch 연결 정보
   elasticsearch:
     uris: ${ELASTICSEARCH_URIS:http://localhost:9200}
@@ -24,17 +40,20 @@ spring:
             task-type: RETRIEVAL_DOCUMENT
             dimensions: 768 # MRL(Matryoshka) 지원 모델 - 아래 vectorstore.dimensions 값과 반드시 일치시킬 것
 
+    # 위에서 Spring AI의 ElasticsearchVectorStoreAutoConfiguration을 껐기 때문에 아래 프로퍼티들은
+    # 더 이상 Spring AI가 읽지 않는다. ElasticsearchIndexInitializer/DocumentIngestionService가
+    # index-name만 재사용하고, dimensions/similarity는 문서화 목적 + 매핑 JSON과의 대조용으로 남겨둔다.
+    # 실제 dims/similarity 값은 src/main/resources/elasticsearch/company-policy-index-mapping.json 에 있다.
     vectorstore:
       elasticsearch:
         index-name: company-policy-index
-        # Phase 2에서 RBAC 메타데이터(readableRoles 등)를 포함한 커스텀 매핑으로 인덱스를 직접 생성할 예정이므로
-        # 자동 스키마 초기화는 끔. 인덱스가 없으면 애플리케이션이 아니라 별도 초기화 스크립트로 생성한다.
-        initialize-schema: false
-        dimensions: 768 # embedding.text.dimensions 값과 반드시 동일해야 함
+        dimensions: 768 # embedding.text.dimensions 및 매핑 JSON의 embedding.dims 값과 반드시 일치시킬 것
         similarity: cosine
 
 server:
   port: 8080
+  error:
+    include-stacktrace: never # 기본 에러 응답에 스택트레이스가 노출되지 않도록 (정보 노출 방지)
 
 logging:
   level:

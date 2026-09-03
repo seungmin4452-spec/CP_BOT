@@ -1,0 +1,46 @@
+{
+  "settings": {
+    "analysis": {
+      "tokenizer": {
+        "nori_mixed_tokenizer": {
+          "type": "nori_tokenizer",
+          "decompound_mode": "mixed"
+        }
+      },
+      "analyzer": {
+        "korean_nori_analyzer": {
+          "type": "custom",
+          "tokenizer": "nori_mixed_tokenizer",
+          "filter": ["nori_part_of_speech", "lowercase"]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "id": { "type": "keyword" },
+      "content": {
+        "type": "text",
+        "analyzer": "korean_nori_analyzer"
+      },
+      "embedding": {
+        "type": "dense_vector",
+        "dims": 768,
+        "index": true,
+        "similarity": "cosine"
+      },
+      "metadata": {
+        "type": "object",
+        "properties": {
+          "file_name": { "type": "keyword" },
+          "document_title": { "type": "keyword" },
+          "page_number": { "type": "integer" },
+          "end_page_number": { "type": "integer" },
+          "category": { "type": "keyword" },
+          "allowed_roles": { "type": "keyword" },
+          "ingested_at": { "type": "date" }
+        }
+      }
+    }
+  }
+}

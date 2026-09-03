@@ -1,6 +1,9 @@
 services:
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.0
+    # 한국어(nori) 형태소 분석 플러그인이 포함된 커스텀 이미지 빌드 (docker/elasticsearch/Dockerfile)
+    build:
+      context: ./docker/elasticsearch
+    image: cp-bot-elasticsearch-nori:9.5.0
     container_name: cp-bot-elasticsearch
     environment:
       - discovery.type=single-node

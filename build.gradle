@@ -30,7 +30,12 @@ dependencies {
 	// Gemini Embedding 모델(gemini-embedding-001) 연동. Chat과 별개 스타터이므로 반드시 함께 추가해야 함
 	implementation 'org.springframework.ai:spring-ai-starter-model-google-genai-embedding'
 	implementation 'org.springframework.ai:spring-ai-starter-vector-store-elasticsearch'
+	// spring-ai-starter-vector-store-elasticsearch는 ElasticsearchClient를 내부적으로만 사용하고 빈으로 노출하지 않는다.
+	// 인덱스 초기화/직접 색인에 ElasticsearchClient를 주입받아야 해서 표준 오토컨피그를 별도로 추가한다.
+	implementation 'org.springframework.boot:spring-boot-starter-data-elasticsearch'
 	implementation 'org.springframework.ai:spring-ai-vector-store-advisor'
+	// PDF 파싱(PagePdfDocumentReader) - Phase 2 Ingestion 파이프라인
+	implementation 'org.springframework.ai:spring-ai-pdf-document-reader'
 	compileOnly 'org.projectlombok:lombok'
 	developmentOnly 'org.springframework.boot:spring-boot-devtools'
 	annotationProcessor 'org.projectlombok:lombok'
