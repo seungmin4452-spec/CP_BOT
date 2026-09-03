@@ -35,7 +35,38 @@ WebSearch/WebFetch로 재확인한다. 기억이나 과거 세션의 값을 그�
 - [x] **Phase 1: 인프라/프로젝트 세팅** - `docker-compose.yml`, `build.gradle`, `application.yml` 완료
 - [x] **Phase 2: 문서 Ingestion 파이프라인** - `POST /api/documents` (PDF 업로드 → 페이지 분리 → Chunking → Gemini 임베딩 → ES bulk 적재)
 - [x] **Phase 3: 하이브리드 검색 및 RBAC 필터링** - `POST /api/search` (ES RRF retriever(BM25 + kNN) + 사전 권한 필터)
-- [ ] **Phase 4: RAG 채팅 API** - Spring AI `QuestionAnswerAdvisor`/`RetrievalAugmentationAdvisor` 기반 프롬프트 조합
+- [x] **Phase 4: RAG 채팅 API** - `POST /api/chat` (검색 결과 기반 프롬프트 조합 + Gemini 응답 + 출처 표기)
+
+### Phase 4 설계 메모
+
+- Spring AI의 `QuestionAnswerAdvisor`/`RetrievalAugmentationAdvisor`는 내부적으로 `VectorStore`를 호출하는
+  구조인데, 이 프로젝트는 Phase 2/3에서 이유가 있어 `VectorStore` 자동설정을 껐다(위 Phase 2/3 메모 참고).
+  그래서 Advisor를 쓰지 않고 `RagChatService`가 `HybridSearchService` 결과로 프롬프트를 직접 조립해
+  `ChatClient`(Spring AI가 `ChatModel` 존재 시 자동 구성하는 `ChatClient.Builder` 빈을 주입받아 build)를 호출한다.
+- **검색 결과가 0건이면 Gemini Chat 호출 자체를 생략**하고 고정 문구("제공된 사내 규정 문서에서 관련 내용을
+  찾을 수 없습니다.")를 즉시 반환한다(`RagChatService.ask()`). 다만 질의 임베딩(kNN 검색을 위한
+  `EmbeddingModel.embed()`)은 검색 자체에 필요해서 결과가 0건이어도 항상 호출된다 - 아낄 수 있는 건
+  Chat Completion 호출뿐이다.
+- **RBAC는 검색 단계에서 이미 차단되므로, LLM은 애초에 권한 없는 문서 내용을 보지 못한다** (프롬프트로
+  "이건 보지 마"라고 지시하는 방식이 아니라 컨텍스트에 아예 포함되지 않음). 2026-09-03 실제 Gemini API 키로
+  end-to-end 검증: USER 역할로 ADMIN 전용 문서(임원 성과급 규정) 내용을 질문하면 "찾을 수 없습니다"를 반환했고,
+  같은 질문을 ADMIN으로 하면 정확한 답변 + 출처(`문서명 (파일명, p.페이지)`)를 반환했다.
+- 시스템 프롬프트는 (1) 컨텍스트에 없으면 추측 금지 및 고정 문구로만 답변, (2) 답변 마지막 줄에 실제 활용한
+  출처를 반드시 명시하도록 지시한다. 이와 별개로 검색 메타데이터에서 뽑은 **구조화된 `citations` 배열도
+  응답에 항상 포함**한다 - LLM이 출처 표기를 깜빡하거나 형식을 틀려도 프런트엔드가 신뢰할 수 있는 출처를
+  보여줄 수 있도록 이중 안전장치를 둔 것.
+
+### ⚠️ 로컬 검증 중 발견한 환경 문제 (재발 방지용 기록)
+
+- **`.env`에 값이 빈 채로 남은 줄(`APP_SECURITY_DEMO_ADMIN_PASSWORD=`)이 있으면, `set -a; source .env`로
+  내보낼 때 "빈 문자열이 실제로 export"되고, Spring은 이를 "속성이 존재함(빈 값)"으로 해석해 `@Value`의
+  `:defaultValue` 폴백이 적용되지 않는다.** 결과적으로 데모 계정 로그인이 전부 401로 막히는데 원인을 알기
+  어렵다. 그래서 `.env.example`은 선택적 값들을 기본적으로 주석 처리(`# KEY=`)해뒀다 - 정말 커스텀 값이
+  필요할 때만 주석을 풀고 값을 채울 것. 이 프로젝트에서 새로운 선택적 환경변수를 추가할 때도 같은 패턴을 따를 것.
+- **Gradle 데몬이 재사용되면 새로 바뀐 환경변수(.env 등)가 반영되지 않을 수 있다.** `./gradlew bootRun`을
+  실행하기 전 셸의 환경변수를 바꿨는데 이전 데몬이 살아있으면, 데몬이 처음 기동될 때의 환경을 계속 들고
+  있어서 조용히 예전 값으로 동작한다. 환경변수를 바꾼 뒤에는 `./gradlew --stop`으로 데몬을 먼저 종료하고
+  재기동하는 것이 안전하다(직접 겪은 문제 - `.env` 값이 반영 안 돼서 한참 헤맸다).
 
 ### Phase 3 설계 메모
 
@@ -85,6 +116,16 @@ curl -X POST http://localhost:8080/api/search \
   -u admin:admin-local-dev-only \
   -H "Content-Type: application/json" \
   -d '{"query":"연차는 며칠인가요?"}'
+```
+
+### Phase 4 사용법 (로컬)
+
+```bash
+curl -X POST http://localhost:8080/api/chat \
+  -u user:user-local-dev-only \
+  -H "Content-Type: application/json" \
+  -d '{"question":"연차는 며칠인가요?"}'
+# => {"answer":"...(생성된 답변 + 출처 문구)...","citations":[{"documentTitle":...,"fileName":...,"pageNumber":...}]}
 ```
 
 ### Phase 2 설계 메모
