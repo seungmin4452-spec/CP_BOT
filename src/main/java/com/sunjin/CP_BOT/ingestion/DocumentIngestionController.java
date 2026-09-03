@@ -14,8 +14,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.util.Set;
 
 /**
- * 사내 규정 PDF 업로드 API. 현재는 SecurityConfig에서 전체 허용 중이며,
- * Phase 3에서 ADMIN 권한만 호출 가능하도록 인가를 추가할 예정이다.
+ * 사내 규정 PDF 업로드 API. SecurityConfig에서 ROLE_ADMIN만 호출 가능하도록 제한한다.
  */
 @Validated
 @RestController

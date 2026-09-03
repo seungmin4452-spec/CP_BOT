@@ -34,8 +34,58 @@ WebSearch/WebFetch로 재확인한다. 기억이나 과거 세션의 값을 그�
 
 - [x] **Phase 1: 인프라/프로젝트 세팅** - `docker-compose.yml`, `build.gradle`, `application.yml` 완료
 - [x] **Phase 2: 문서 Ingestion 파이프라인** - `POST /api/documents` (PDF 업로드 → 페이지 분리 → Chunking → Gemini 임베딩 → ES bulk 적재)
-- [ ] **Phase 3: 하이브리드 검색 및 RBAC 필터링** - ES RRF retriever(BM25 + kNN) + 사전 권한 필터
+- [x] **Phase 3: 하이브리드 검색 및 RBAC 필터링** - `POST /api/search` (ES RRF retriever(BM25 + kNN) + 사전 권한 필터)
 - [ ] **Phase 4: RAG 채팅 API** - Spring AI `QuestionAnswerAdvisor`/`RetrievalAugmentationAdvisor` 기반 프롬프트 조합
+
+### Phase 3 설계 메모
+
+- **⚠️ Elasticsearch 네이티브 `retriever.rrf`는 Platinum/Enterprise 유료 라이선스 전용 기능이다.**
+  우리 `docker-compose.yml`의 ES는 기본(Basic/무료) 라이선스라서 RRF 쿼리를 보내면
+  `security_exception: current license is non-compliant for [Reciprocal Rank Fusion (RRF)]`로 거부된다
+  (2026-09-03 직접 확인). 반면 **BM25 단독 쿼리와 kNN 단독 쿼리는 Basic 라이선스에서도 무료**다.
+  그래서 이 프로젝트는 (사용자와 상의 후) 네이티브 RRF retriever를 쓰지 않고, BM25 쿼리와 kNN 쿼리를
+  각각 따로 실행한 뒤 **RRF 융합 공식(`score(doc) = Σ 1/(rank_constant + rank)`, rank_constant=60)을
+  `HybridSearchService.fuseWithRrf()`에서 Java로 직접 재구현**해 두 결과를 합친다. Elastic 라이선스를
+  구매하기로 결정이 바뀌면 `HybridSearchService`를 네이티브 `retriever.rrf` 단일 요청으로 되돌릴 수 있다
+  (그때도 `rrf.filter`가 산하 서브 리트리버 전체에 자동 전파된다는 것까지는 확인해뒀다).
+- RBAC 필터(`metadata.allowed_roles` `terms` 쿼리)는 BM25/kNN **두 쿼리 모두에 각각** 걸어야 한다.
+  한쪽에만 걸면 그 쿼리의 결과만으로 권한 없는 문서가 새어나갈 수 있다.
+- 두 쿼리 모두 raw JSON으로 조립해 `SearchRequest.of(b -> b.index(...).withJson(reader))`로 실행한다
+  (Phase 2의 인덱스 생성과 동일한 패턴). 문자열 포매팅이 아니라 `Map`을 구성해 Jackson `ObjectMapper`로
+  직렬화하는 방식을 쓴다 - 사용자 질의 텍스트에 따옴표/역슬래시가 섞여도 안전하다.
+- **ADMIN은 RBAC 필터를 적용하지 않는다**(모든 문서 열람 가능). 그 외 역할은 `metadata.allowed_roles`에
+  자신의 역할이 하나라도 포함된 문서만 조회된다. 이 필터는 클라이언트가 요청 바디로 지정하는 게 아니라
+  **인증된 `Authentication`의 역할에서 서버가 직접 뽑아** 쓴다(`SearchController`) - 그렇지 않으면 누구나
+  `allowedRoles=ADMIN`을 자칭해 모든 문서를 열람할 수 있어 RBAC 자체가 무의미해진다.
+- 이 때문에 Phase 2의 **임시 permitAll `SecurityConfig`를 실제 HTTP Basic 인증(인메모리 `admin`/`user`
+  계정)으로 교체**했다. `/api/documents`는 `ROLE_ADMIN`만, 나머지는 인증된 사용자면 누구나 호출 가능하다.
+  데모 계정 비밀번호는 `app.security.demo-admin-password` / `app.security.demo-user-password`
+  (`.env`의 `APP_SECURITY_DEMO_ADMIN_PASSWORD` 등)로 재정의할 수 있고, 기본값은 `*-local-dev-only`다.
+  **실제 서비스에서는 반드시 사내 IdP/LDAP 연동이나 JWT 인증으로 교체할 것.**
+- **`taskType`(예: 질의 임베딩에 `RETRIEVAL_QUERY` 사용) 설정은 Spring AI 2.0.1에서 사실상 no-op다.**
+  `GoogleGenAiTextEmbeddingModel.call()` 소스를 직접 확인한 결과 `dimensions`는 Gemini API 요청에
+  정상적으로 전달되지만 `taskType`은 옵션에 병합만 되고 실제 `EmbedContentConfig` 빌드 시 누락되어 있다
+  (`spring-projects/spring-ai` 이슈 #5966, 확인일 2026-09-03, TODO 주석 존재). 그래서 `HybridSearchService`는
+  질의 임베딩 시 별도 `RETRIEVAL_QUERY` 옵션을 주지 않고 그냥 `embeddingModel.embed(queryText)`를 쓴다 -
+  동작하지 않는 옵션을 설정해 코드를 복잡하게 만들 이유가 없다. **이 이슈가 spring-ai 패치로 해결되면**
+  Ingestion(RETRIEVAL_DOCUMENT)과 검색(RETRIEVAL_QUERY)에 서로 다른 task-type을 명시적으로 넣어
+  비대칭 임베딩 검색 품질을 개선할 것.
+
+### Phase 3 사용법 (로컬)
+
+```bash
+# USER 계정으로 검색 - allowedRoles에 USER가 없는 문서는 결과에서 자동 제외됨
+curl -X POST http://localhost:8080/api/search \
+  -u user:user-local-dev-only \
+  -H "Content-Type: application/json" \
+  -d '{"query":"연차는 며칠인가요?","topK":5}'
+
+# ADMIN 계정으로 검색 - 모든 문서 대상
+curl -X POST http://localhost:8080/api/search \
+  -u admin:admin-local-dev-only \
+  -H "Content-Type: application/json" \
+  -d '{"query":"연차는 며칠인가요?"}'
+```
 
 ### Phase 2 설계 메모
 
@@ -56,15 +106,13 @@ WebSearch/WebFetch로 재확인한다. 기억이나 과거 세션의 값을 그�
   (`docker-compose.yml`의 `elasticsearch` 서비스가 `image:` 대신 `build:`를 사용하도록 변경됨).
 - `dense_vector.dims`(매핑 JSON, 현재 768)와 `application.yml`의 `spring.ai.google.genai.embedding.text.dimensions` /
   `spring.ai.vectorstore.elasticsearch.dimensions` 세 값은 반드시 동일해야 한다. 하나라도 바꾸면 셋 다 같이 바꿀 것.
-- **`SecurityConfig`는 임시로 모든 요청을 허용**한다 (`spring-boot-starter-security`가 있으면 기본적으로
-  전 요청이 인증을 요구해서 로컬 테스트가 불가능하기 때문). Phase 3에서 실제 인증/인가로 반드시 교체해야 하며,
-  이 상태로 배포하면 안 된다.
+- (Phase 3에서 교체됨) `SecurityConfig`는 처음엔 임시로 모든 요청을 허용했으나, Phase 3에서 실제 HTTP Basic
+  인증으로 교체했다. 아래 Phase 3 설계 메모 참고.
 - `server.error.include-stacktrace: never`를 설정해도 **로컬 `bootRun`에서는 스택트레이스가 계속 노출된다.**
   `spring-boot-devtools`(developmentOnly 의존성)가 개발 편의를 위해 이 값을 강제로 `always`로 덮어쓰기 때문이며,
   devtools가 빠지는 실제 운영 빌드(`bootJar`)에서는 설정한 대로 `never`가 적용된다. 버그 아님 - 재확인하느라 시간 쓰지 말 것.
-- Gemini 임베딩은 현재 `task-type: RETRIEVAL_DOCUMENT`로 전역 고정되어 있다. 이는 문서 적재(비대칭 임베딩의
-  document 쪽)에는 맞지만, Phase 4에서 사용자 질문을 임베딩할 때는 `RETRIEVAL_QUERY`가 검색 정확도상 더 적합하다.
-  Phase 4에서 질문 임베딩용 별도 설정/호출 경로가 필요한지 검토할 것.
+- Gemini 임베딩은 현재 `task-type: RETRIEVAL_DOCUMENT`로 전역 고정되어 있다. (Phase 3에서 확인: 현재 Spring AI
+  버전에서는 `taskType`이 API 호출에 반영되지 않는 no-op이라 사실상 영향 없음 - 아래 Phase 3 메모 참고.)
 
 ### Phase 2 사용법 (로컬)
 
