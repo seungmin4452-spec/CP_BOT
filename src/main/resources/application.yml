@@ -12,11 +12,13 @@ spring:
     exclude:
       - org.springframework.ai.vectorstore.elasticsearch.autoconfigure.ElasticsearchVectorStoreAutoConfiguration
 
-  # 규정 PDF는 수십 페이지가 흔하므로 기본값(1MB)보다 넉넉하게 설정
+  # 규정 PDF 낱장은 50MB로도 충분하지만, zip 일괄 업로드(여러 PDF/Word를 압축)는 실측상 최대 1.4GB까지
+  # 나온다 - 여유를 두고 2GB로 설정. 무제한(-1) 대신 명시적 상한을 둬서 실수로 지나치게 큰 업로드가
+  # 서버 메모리를 무한정 잡아먹는 것은 막는다.
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 50MB
+      max-file-size: 2GB
+      max-request-size: 2GB
 
   # docker-compose.yml 로 띄운 로컬 Elasticsearch 연결 정보
   elasticsearch:

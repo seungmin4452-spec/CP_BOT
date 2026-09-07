@@ -24,6 +24,7 @@ ext {
 dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-security'
 	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+	implementation 'org.springframework.boot:spring-boot-starter-thymeleaf'
 	implementation 'org.springframework.boot:spring-boot-starter-validation'
 	// Gemini Chat 모델(gemini-3.5-flash 등) 연동
 	implementation 'org.springframework.ai:spring-ai-starter-model-google-genai'
@@ -36,6 +37,8 @@ dependencies {
 	implementation 'org.springframework.ai:spring-ai-vector-store-advisor'
 	// PDF 파싱(PagePdfDocumentReader) - Phase 2 Ingestion 파이프라인
 	implementation 'org.springframework.ai:spring-ai-pdf-document-reader'
+	// Word(doc/docx) 파싱(TikaDocumentReader, Apache Tika 기반) - Phase 5 Ingestion 확장
+	implementation 'org.springframework.ai:spring-ai-tika-document-reader'
 	compileOnly 'org.projectlombok:lombok'
 	developmentOnly 'org.springframework.boot:spring-boot-devtools'
 	annotationProcessor 'org.projectlombok:lombok'

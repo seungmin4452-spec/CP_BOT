@@ -23,11 +23,12 @@ public class RagChatService {
 
     private static final String NO_CONTEXT_ANSWER = "제공된 사내 규정 문서에서 관련 내용을 찾을 수 없습니다.";
 
+    // 출처는 답변 텍스트에 넣지 않는다 - 화면에서 답변 박스 아래에 구조화된 citations로 따로 표시한다
+    // (아래 citations 조립부 참고). 답변 안에 "출처: ..." 문구가 같이 뜨면 화면에 출처가 이중으로 보인다.
     private static final String SYSTEM_PROMPT = """
             당신은 사내 규정 안내 도우미입니다. 아래 [참고 자료]에 있는 내용만 근거로 답변하십시오.
             자료에 없는 내용은 절대 추측하거나 지어내지 말고, 그런 경우에는 "제공된 사내 규정 문서에서 관련 내용을 찾을 수 없습니다."라고만 답하십시오.
-            답변의 마지막 줄에는 실제로 답변에 활용한 자료의 출처를 다음 형식으로 반드시 나열하십시오 (여러 개면 줄바꿈으로 구분):
-            출처: <문서명> (<파일명>, p.<페이지>)
+            답변 텍스트에는 출처나 문서명/파일명/페이지 번호를 언급하지 마십시오. 출처는 별도 화면 영역에 따로 표시됩니다.
             """;
 
     private final HybridSearchService hybridSearchService;
@@ -71,8 +72,9 @@ public class RagChatService {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < results.size(); i++) {
             HybridSearchService.SearchResultItem r = results.get(i);
+            String page = r.pageNumber() == null ? "없음(페이지 구분 없는 문서)" : String.valueOf(r.pageNumber());
             sb.append("[자료 %d] 문서: %s / 파일: %s / 페이지: %s%n%s%n%n"
-                    .formatted(i + 1, r.documentTitle(), r.fileName(), r.pageNumber(), r.content()));
+                    .formatted(i + 1, r.documentTitle(), r.fileName(), page, r.content()));
         }
         return sb.toString();
     }

@@ -14,7 +14,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.util.Set;
 
 /**
- * 사내 규정 PDF 업로드 API. SecurityConfig에서 ROLE_ADMIN만 호출 가능하도록 제한한다.
+ * 사내 규정 문서(PDF, Word) 업로드 API. SecurityConfig에서 ROLE_ADMIN만 호출 가능하도록 제한한다.
  */
 @Validated
 @RestController
@@ -32,5 +32,16 @@ public class DocumentIngestionController {
             @RequestParam("allowedRoles") @NotEmpty Set<String> allowedRoles) {
 
         return documentIngestionService.ingest(file, documentTitle, category, allowedRoles);
+    }
+
+    // zip은 문서명을 파일마다 사람이 입력할 수 없으므로 documentTitle 파라미터가 없다
+    // (DocumentIngestionService가 파일명/최상위 폴더명에서 문서명/카테고리를 자동으로 뽑는다).
+    @ResponseStatus(HttpStatus.CREATED)
+    @PostMapping(value = "/api/documents/batch", consumes = "multipart/form-data")
+    public DocumentIngestionService.BatchIngestionResult ingestZip(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam("allowedRoles") @NotEmpty Set<String> allowedRoles) {
+
+        return documentIngestionService.ingestZip(file, allowedRoles);
     }
 }

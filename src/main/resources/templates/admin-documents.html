@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="_csrf" th:content="${_csrf.token}">
+    <meta name="_csrf_header" th:content="${_csrf.headerName}">
+    <title>문서 관리 - 사내 규정 Q&amp;A</title>
+    <link rel="stylesheet" th:href="@{/css/style.css}">
+</head>
+<body>
+    <div class="app">
+        <header class="app-header">
+            <h1 class="app-title">사내 규정 Q&amp;A · 문서 관리</h1>
+            <div class="app-user">
+                <span class="user-badge" th:text="${username}">admin</span>
+                <a class="btn btn-ghost" th:href="@{/}">채팅으로</a>
+                <form th:action="@{/logout}" method="post" class="logout-form">
+                    <button class="btn btn-ghost" type="submit">로그아웃</button>
+                </form>
+            </div>
+        </header>
+
+        <main class="page-body">
+            <section class="form-card">
+                <h2 class="form-card-title">규정 문서 업로드</h2>
+                <p class="form-card-subtitle">PDF 또는 Word(doc/docx) 파일을 업로드하면 청크로 나뉘어 검색 인덱스에 적재됩니다.</p>
+
+                <div id="result-alert" class="alert" hidden></div>
+
+                <form id="upload-form" class="upload-form">
+                    <label class="field-label" for="file">파일 (PDF / DOCX / DOC)</label>
+                    <input class="field-input" type="file" id="file" name="file" accept=".pdf,.docx,.doc" required>
+
+                    <label class="field-label" for="documentTitle">문서명</label>
+                    <input class="field-input" type="text" id="documentTitle" name="documentTitle" placeholder="예) 휴가 규정" required>
+
+                    <label class="field-label" for="category">카테고리</label>
+                    <input class="field-input" type="text" id="category" name="category" placeholder="예) 인사" value="일반">
+
+                    <span class="field-label">열람 권한</span>
+                    <div class="checkbox-row">
+                        <label class="checkbox-label">
+                            <input type="checkbox" name="allowedRoles" value="USER" checked> USER
+                        </label>
+                        <label class="checkbox-label">
+                            <input type="checkbox" name="allowedRoles" value="ADMIN" checked> ADMIN
+                        </label>
+                    </div>
+
+                    <button class="btn btn-primary" type="submit" id="upload-btn">업로드</button>
+                </form>
+            </section>
+
+            <section class="form-card">
+                <h2 class="form-card-title">zip 일괄 업로드</h2>
+                <p class="form-card-subtitle">
+                    zip 안의 모든 pdf/docx/doc 파일을 한 번에 적재합니다. 문서명은 파일명에서, 카테고리는
+                    zip 최상위 폴더명에서 자동으로 정해집니다(폴더 없이 최상위에 있으면 "일반"). 열람 권한은
+                    zip 안 모든 파일에 공통 적용됩니다.
+                </p>
+
+                <div id="zip-result-alert" class="alert" hidden></div>
+
+                <form id="zip-upload-form" class="upload-form">
+                    <label class="field-label" for="zip-file">zip 파일 (여러 개 선택 가능)</label>
+                    <input class="field-input" type="file" id="zip-file" name="file" accept=".zip" multiple required>
+
+                    <span class="field-label">열람 권한</span>
+                    <div class="checkbox-row">
+                        <label class="checkbox-label">
+                            <input type="checkbox" name="allowedRoles" value="USER" checked> USER
+                        </label>
+                        <label class="checkbox-label">
+                            <input type="checkbox" name="allowedRoles" value="ADMIN" checked> ADMIN
+                        </label>
+                    </div>
+
+                    <button class="btn btn-primary" type="submit" id="zip-upload-btn">zip 업로드</button>
+                </form>
+            </section>
+        </main>
+    </div>
+
+    <script th:src="@{/js/admin-documents.js}"></script>
+</body>
+</html>

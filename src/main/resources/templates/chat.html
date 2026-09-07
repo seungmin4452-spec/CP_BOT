@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ko" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="_csrf" th:content="${_csrf.token}">
+    <meta name="_csrf_header" th:content="${_csrf.headerName}">
+    <title>사내 규정 Q&amp;A</title>
+    <link rel="stylesheet" th:href="@{/css/style.css}">
+</head>
+<body>
+    <div class="app">
+        <header class="app-header">
+            <h1 class="app-title">사내 규정 Q&amp;A</h1>
+            <div class="app-user">
+                <span class="user-badge" th:text="${username}">user</span>
+                <span class="role-badge" th:if="${isAdmin}">ADMIN</span>
+                <a class="btn btn-ghost" th:if="${isAdmin}" th:href="@{/admin/documents}">문서 관리</a>
+                <form th:action="@{/logout}" method="post" class="logout-form">
+                    <button class="btn btn-ghost" type="submit">로그아웃</button>
+                </form>
+            </div>
+        </header>
+
+        <main class="chat-log" id="chat-log">
+            <div class="msg msg-assistant">
+                <div class="bubble">
+                    안녕하세요. 사내 규정에 대해 궁금한 점을 물어보세요. 답변은 등록된 규정 문서 범위 내에서만 제공됩니다.
+                </div>
+            </div>
+        </main>
+
+        <form class="composer" id="composer">
+            <textarea id="question" class="composer-input" placeholder="예) 연차는 며칠인가요?" rows="1" required></textarea>
+            <button class="btn btn-primary composer-send" type="submit" id="send-btn">보내기</button>
+        </form>
+    </div>
+
+    <script th:src="@{/js/vendor/marked.min.js}"></script>
+    <script th:src="@{/js/vendor/purify.min.js}"></script>
+    <script th:src="@{/js/chat.js}"></script>
+</body>
+</html>
