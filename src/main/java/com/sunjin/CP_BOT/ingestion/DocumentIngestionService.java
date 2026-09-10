@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -146,8 +147,22 @@ public class DocumentIngestionService {
         return new BatchIngestionResult(succeeded, skipped);
     }
 
+    // 캐릭터/CI 운영규정 폴더에 실제로 포스터·배너용 순수 이미지 PDF(예: 공고문 배너)가 다수 섞여 있는 것을
+    // 확인했다 - 이런 파일은 PagePdfDocumentReader/TikaDocumentReader로 읽어도 추출되는 텍스트가 몇 글자
+    // 수준(실측 8바이트)이라 색인해도 검색/답변에 쓸 내용이 없다. 반면 실제 규정 중 가장 짧은 축(윤리헌장 등
+    // 선언문류)도 최소 1,500자 이상은 나와서, 이 둘을 가르는 데는 낮은 임계값으로도 충분하다. 스캔본(본문이
+    // 이미지인 규정 PDF)은 이 검사로 걸러지는 게 아니라 별개 문제(OCR 필요)라 여기서 다루지 않는다.
+    private static final int MIN_EXTRACTABLE_TEXT_LENGTH = 50;
+
     private IngestedChunks ingestOne(Resource resource, String fileName, String documentTitle, String category, Set<String> allowedRoles) {
         List<Document> sourceDocuments = readDocuments(resource, fileName);
+        int extractedTextLength = sourceDocuments.stream()
+                .mapToInt(document -> document.getText().strip().length())
+                .sum();
+        if (extractedTextLength < MIN_EXTRACTABLE_TEXT_LENGTH) {
+            throw new IllegalArgumentException(
+                    "추출 가능한 텍스트가 거의 없습니다(이미지 위주 파일로 추정): " + fileName);
+        }
         List<Document> chunks = splitIntoChunks(sourceDocuments);
         bulkIndex(chunks, fileName, documentTitle, category, allowedRoles);
         return new IngestedChunks(sourceDocuments.size(), chunks.size());
@@ -223,23 +238,60 @@ public class DocumentIngestionService {
         }
     }
 
-    // "제1조", "제2조의2" 처럼 줄 시작에 오는 조항 번호만 경계로 인정한다("제3조에 따라"처럼 문장 중간에 등장하는
-    // 다른 조항 참조는 매치되지 않도록 줄 시작(^)을 요구함). 사내 규정 문서가 전부 이 형식이라는 걸 확인하고 도입.
-    private static final Pattern ARTICLE_PATTERN = Pattern.compile("(?m)^제\\s*\\d+조(?:의\\s*\\d+)?");
+    // "제1조", " 제 1 조", "제2조의2"처럼 줄 시작에 오는 조항 번호만 경계로 인정한다("제3조에 따라"처럼 문장
+    // 중간에 등장하는 다른 조항 참조는 매치되지 않도록 줄 시작(^)을 요구함). 숫자와 "조" 사이의 공백(예: "제 1 조")과
+    // 줄 맨 앞의 들여쓰기 공백(예: " 제 1 조[목 적]")도 허용하는데, 실제 규정 PDF 130개를 표본 조사한 결과 이
+    // 띄어쓴 표기를 쓰는 문서가 전체의 약 20%(예: 전산장비관리규정, 여비규정, 정보보호정책, 사택 및 주거지원규정)
+    // 였고, 이 문서들은 "제1조"만 인정하던 예전 정규식으로는 조항 경계를 하나도 못 찾아 문서 전체가 토큰 기준으로만
+    // 쪼개지고 있었다. 다만 이렇게 공백을 허용하면 "제11조에 의한..."처럼 줄 첫머리에서 조항을 인용만 하는
+    // 문장(개행이 우연히 그 위치에서 끊긴 경우)까지 걸릴 위험이 커지므로, 매치 직후에 한글이 바로 이어지면(즉
+    // 조사가 공백 없이 붙으면) 제목이 아니라 본문 인용으로 보고 제외한다(실제 감사규정 "제18조(시정확인)\n제17조의
+    // 시정요구에 대하여는..." 케이스로 확인). 이 필터를 거치고도 법령 인용표처럼 표 형태의 문서(예: 산업안전보건법
+    // 위반 과태료표)에서 드물게 오탐이 남을 수 있지만, 그런 문서는 애초에 표 구조라 조항 단위 청킹의 이득이 없고
+    // 회사 자체 규정도 아니어서(외부 참고자료) 감수할 수 있는 수준으로 판단했다.
+    private static final Pattern ARTICLE_PATTERN =
+            Pattern.compile("(?m)^\\s*제\\s*\\d+\\s*조(?:\\s*의\\s*\\d+)?(?![가-힣])");
+
+    // 부칙(附則)은 "제N조" 형식을 쓰지 않고 "1. (시행일)", "①(시행일)"처럼 별도의 번호체계를 쓰는 경우가
+    // 실제 규정 문서 표본의 절반 가까이에서 확인됐다. 이런 문서는 부칙 전체가 마지막 조항의 꼬리에 그대로
+    // 붙어버려("제24조" 청크에 시행일 정보가 섞여 들어가는 식) 시행일/경과조치를 물어보는 질의의 근거가 흐려진다.
+    // "부칙(채권관리매뉴얼 SCP-A2. 2011년 07월 08일 제정)"처럼 괄호가 바로 붙는 경우도 있어 줄 끝까지는 요구하지
+    // 않는다. ARTICLE_PATTERN과 마찬가지로 직후에 한글이 바로 붙으면("부칙은 ...") 제목이 아닌 본문으로 보고 제외한다.
+    private static final Pattern ADDENDUM_PATTERN =
+            Pattern.compile("(?m)^\\s*※?\\s*부\\s*칙(?![가-힣])");
+
+    // 목차(TOC) 페이지가 "제10조 (표제) ..................... 3"처럼 조항 패턴을 그대로 흉내내면서 점선 리더 뒤에
+    // 페이지 번호를 붙이는 문서가 다수 확인됐다(정보보호정책류). 본문 조항 제목은 이런 형태로 끝나지 않으므로,
+    // 매치된 줄의 나머지 부분이 점 3개 이상 + (선택적) 숫자로 끝나면 목차 항목으로 보고 경계에서 제외한다 -
+    // 그렇지 않으면 목차 한 페이지가 조항마다 한 줄씩 잘려 의미 없는 초소형 청크가 수십 개 생긴다.
+    private static final Pattern TOC_DOT_LEADER_SUFFIX = Pattern.compile("\\.{3,}\\s*\\d*\\s*$");
+
+    // "Ⅰ. 담보평가"처럼 "제N조" 대신 로마숫자 대제목 + 소수점 하위목차("1.", "4.1", "4.3.1.1" 등)를 쓰는
+    // 매뉴얼(예: 채권관리매뉴얼)이 표본에서 확인됐다. 소수점 항목("1.", "2.1" 등)은 다른 모든 문서에서도
+    // 흔한 일반 목록 표기라 전역 경계로 쓰면 오탐이 너무 많으므로, 이 매뉴얼류에서도 로마숫자 대제목만
+    // 경계로 인정한다. 그마저도 "제N조" 형식을 쓰는 절대다수 문서에는 전혀 적용하지 않고, ARTICLE_PATTERN/
+    // ADDENDUM_PATTERN이 경계를 하나도 못 찾은 문서에 한해서만 2차 폴백으로 시도한다(로마숫자가 다른 의미로
+    // 쓰이는 문서에 영향이 가지 않도록 범위를 최대한 좁힘).
+    private static final Pattern ROMAN_NUMERAL_PATTERN = Pattern.compile("(?m)^[Ⅰ-Ⅹ]+\\.\\s*\\S");
+
+    // 이런 매뉴얼의 목차는 2단 레이아웃이라 "Ⅰ. 담보평가                    2. 거래의 개설"처럼 같은 줄에
+    // 다른 항목이 이어붙는 경우가 많다. 본문의 진짜 대제목은 제목만 있고 그 줄이 끝나므로, 매치된 줄에 공백
+    // 4칸 이상 뒤에 다른 문자가 더 있으면 목차의 병합된 줄로 보고 제외한다(완벽하진 않지만 대부분을 걸러낸다).
+    private static final Pattern MULTI_COLUMN_TOC_GAP = Pattern.compile("\\S\\s{4,}\\S");
 
     /**
-     * 토큰 개수가 아니라 "제N조" 조항 경계로 먼저 나눈 뒤, 한 조항이 너무 길면(500토큰 초과)
-     * {@link TokenTextSplitter}로 그 조항만 추가로 쪼갠다. 순수 토큰 기반 분할과 달리 조항 하나가
+     * 토큰 개수가 아니라 "제N조"/"부칙" 경계로 먼저 나눈 뒤, 한 덩어리가 너무 길면(500토큰 초과)
+     * {@link TokenTextSplitter}로 그 부분만 추가로 쪼갠다. 순수 토큰 기반 분할과 달리 조항 하나가
      * 통째로 한 청크에 들어가서, "조건은 있는데 예외 조항이 다른 청크로 잘려나가는" 문제를 줄인다.
      * <p>
      * PDF는 원래 페이지 단위(Document 1개=1페이지)로 들어오는데, 조항이 페이지 경계를 넘어갈 수 있어서
-     * 여러 페이지 텍스트를 순서대로 이어붙인 뒤 그 전체 텍스트에서 조항 경계를 찾는다. 각 조항 청크의
-     * page_number/end_page_number는 그 조항이 실제로 걸쳐있는 페이지 범위로 다시 계산해서 넣는다
+     * 여러 페이지 텍스트를 순서대로 이어붙인 뒤 그 전체 텍스트에서 경계를 찾는다. 각 청크의
+     * page_number/end_page_number는 그 내용이 실제로 걸쳐있는 페이지 범위로 다시 계산해서 넣는다
      * (기존에 있던 필드를 그대로 활용 - PagePdfDocumentReader가 페이지당 1개 청크만 만들 때는
      * page_number == end_page_number였지만, 조항이 페이지를 넘기면 이제 진짜로 범위가 될 수 있다).
      * Word 문서는 애초에 페이지 개념이 없으므로(TikaDocumentReader가 문서 전체를 1개 Document로 읽음)
-     * 페이지 메타데이터 없이 조항 경계만 찾는다. "제N조" 패턴을 하나도 못 찾으면(문서가 이 형식을 안 따름)
-     * 문서 전체를 조항 하나로 취급해 예전과 동일하게 동작한다(안전한 폴백).
+     * 페이지 메타데이터 없이 경계만 찾는다. "제N조" 패턴을 하나도 못 찾으면(문서가 이 형식을 안 따름)
+     * 문서 전체를 하나로 취급해 예전과 동일하게 동작한다(안전한 폴백).
      */
     private List<Document> splitIntoChunks(List<Document> sourceDocuments) {
         if (sourceDocuments.isEmpty()) {
@@ -263,23 +315,31 @@ public class DocumentIngestionService {
         }
         String fullText = fullTextBuilder.toString();
 
-        List<Integer> articleStarts = new ArrayList<>();
-        Matcher matcher = ARTICLE_PATTERN.matcher(fullText);
-        while (matcher.find()) {
-            articleStarts.add(matcher.start());
+        List<Integer> articleStarts = findBoundaries(ARTICLE_PATTERN, fullText, -1);
+        // 부칙 항목은 목차에도 같은 글자로 나열되는 경우가 많은데("제1장 총칙 ... 부칙"처럼 번호 없이),
+        // 목차는 항상 첫 조항보다 앞에 나오므로 첫 조항 시작 이전에 등장하는 "부칙"은 목차로 보고 제외한다.
+        int firstArticleStart = articleStarts.isEmpty() ? -1 : articleStarts.get(0);
+        List<Integer> addendumStarts = findBoundaries(ADDENDUM_PATTERN, fullText, firstArticleStart);
+
+        TreeSet<Integer> mergedBoundaries = new TreeSet<>(articleStarts);
+        mergedBoundaries.addAll(addendumStarts);
+        if (mergedBoundaries.isEmpty()) {
+            // "제N조" 형식을 전혀 안 쓰는 문서 - 로마숫자 대제목이라도 있으면 2차 폴백으로 시도한다.
+            mergedBoundaries.addAll(findRomanNumeralBoundaries(fullText));
         }
+        List<Integer> boundaries = new ArrayList<>(mergedBoundaries);
 
         List<Document> articleDocuments = new ArrayList<>();
-        if (articleStarts.isEmpty()) {
+        if (boundaries.isEmpty()) {
             addArticleDocument(articleDocuments, fullText, 0, fullText.length(), pageRanges, hasPageInfo);
         } else {
-            if (articleStarts.get(0) > 0) {
+            if (boundaries.get(0) > 0) {
                 // 제1조 앞의 서문/목차 등도 버리지 않고 별도 청크로 유지한다.
-                addArticleDocument(articleDocuments, fullText, 0, articleStarts.get(0), pageRanges, hasPageInfo);
+                addArticleDocument(articleDocuments, fullText, 0, boundaries.get(0), pageRanges, hasPageInfo);
             }
-            for (int i = 0; i < articleStarts.size(); i++) {
-                int start = articleStarts.get(i);
-                int end = (i + 1 < articleStarts.size()) ? articleStarts.get(i + 1) : fullText.length();
+            for (int i = 0; i < boundaries.size(); i++) {
+                int start = boundaries.get(i);
+                int end = (i + 1 < boundaries.size()) ? boundaries.get(i + 1) : fullText.length();
                 addArticleDocument(articleDocuments, fullText, start, end, pageRanges, hasPageInfo);
             }
         }
@@ -293,6 +353,50 @@ public class DocumentIngestionService {
                 .withKeepSeparator(true)
                 .build();
         return splitter.apply(articleDocuments);
+    }
+
+    /**
+     * 패턴에 매치되는 위치 중 목차의 점선 리더 항목(예: "제10조 (표제) ....... 3")과, minAllowedStart보다
+     * 앞에 나오는 매치(목차에 번호 없이 나열된 "부칙" 등)를 제외하고 실제 경계 오프셋만 반환한다.
+     */
+    private List<Integer> findBoundaries(Pattern pattern, String fullText, int minAllowedStart) {
+        List<Integer> starts = new ArrayList<>();
+        Matcher matcher = pattern.matcher(fullText);
+        while (matcher.find()) {
+            if (matcher.start() < minAllowedStart) {
+                continue;
+            }
+            if (isTableOfContentsLine(fullText, matcher.end())) {
+                continue;
+            }
+            starts.add(matcher.start());
+        }
+        return starts;
+    }
+
+    private boolean isTableOfContentsLine(String fullText, int matchEnd) {
+        int lineEnd = fullText.indexOf('\n', matchEnd);
+        if (lineEnd < 0) {
+            lineEnd = fullText.length();
+        }
+        return TOC_DOT_LEADER_SUFFIX.matcher(fullText.substring(matchEnd, lineEnd)).find();
+    }
+
+    private List<Integer> findRomanNumeralBoundaries(String fullText) {
+        List<Integer> starts = new ArrayList<>();
+        Matcher matcher = ROMAN_NUMERAL_PATTERN.matcher(fullText);
+        while (matcher.find()) {
+            int lineEnd = fullText.indexOf('\n', matcher.end());
+            if (lineEnd < 0) {
+                lineEnd = fullText.length();
+            }
+            String line = fullText.substring(matcher.start(), lineEnd);
+            if (MULTI_COLUMN_TOC_GAP.matcher(line).find()) {
+                continue;
+            }
+            starts.add(matcher.start());
+        }
+        return starts;
     }
 
     private void addArticleDocument(List<Document> target, String fullText, int start, int end,

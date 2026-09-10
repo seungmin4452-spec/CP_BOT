@@ -17,6 +17,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * BM25(content, nori 분석기)와 kNN(embedding) 검색을 각각 따로 실행한 뒤,
@@ -30,6 +34,9 @@ import java.util.Set;
  * <p>
  * RBAC 사전 필터(metadata.allowed_roles)는 두 쿼리 모두에 각각 적용한다 - 필터가 걸리지 않은
  * 쿼리가 하나라도 있으면 그 결과만으로 접근 권한 없는 문서가 새어나갈 수 있기 때문이다.
+ * <p>
+ * BM25 쿼리와 (질의 임베딩 → kNN 쿼리)는 서로 의존관계가 없어 병렬로 실행한다({@link #search}) -
+ * 순차 실행 대비 전체 검색 지연시간이 (BM25, 임베딩+kNN) 중 더 오래 걸리는 쪽 수준으로 줄어든다.
  */
 @Service
 @RequiredArgsConstructor
@@ -42,6 +49,13 @@ public class HybridSearchService {
     // 자동 등록하지 않는다. 여기서는 검색 요청 Map을 JSON으로 직렬화하는 용도로만 쓰므로 DI 없이 직접 생성한다.
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+    // BM25 검색은 쿼리 임베딩이 필요 없고, kNN 검색은 임베딩(Gemini API 호출)이 끝나야 시작할 수 있다.
+    // 원래는 임베딩 → BM25 → kNN을 순서대로 실행해 세 번의 네트워크 왕복이 그대로 합산됐는데, BM25는
+    // 임베딩과 아무 의존관계가 없으므로 "BM25"와 "임베딩 → kNN"을 동시에 실행하면 전체 지연시간이
+    // (BM25, 임베딩+kNN) 중 더 오래 걸리는 쪽으로 줄어든다. 둘 다 블로킹 I/O(ES/Gemini 호출)라 각 요청마다
+    // 스레드를 새로 만들어도 비용이 거의 없는 가상 스레드를 썼다(Java 25).
+    private static final ExecutorService SEARCH_EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
+
     private final ElasticsearchClient elasticsearchClient;
     private final EmbeddingModel embeddingModel;
 
@@ -49,13 +63,34 @@ public class HybridSearchService {
     private String indexName;
 
     public List<SearchResultItem> search(String queryText, Set<String> callerRoles, int topK) {
-        float[] queryEmbedding = embeddingModel.embed(queryText);
         int candidateSize = Math.max(topK * 5, 50);
 
-        List<RankedHit> bm25Hits = runSearch(buildBm25Body(queryText, callerRoles, candidateSize));
-        List<RankedHit> knnHits = runSearch(buildKnnBody(queryEmbedding, callerRoles, candidateSize));
+        CompletableFuture<List<RankedHit>> bm25Future = CompletableFuture.supplyAsync(
+                () -> runSearch(buildBm25Body(queryText, callerRoles, candidateSize)), SEARCH_EXECUTOR);
+
+        CompletableFuture<List<RankedHit>> knnFuture = CompletableFuture
+                .supplyAsync(() -> embeddingModel.embed(queryText), SEARCH_EXECUTOR)
+                .thenApply(queryEmbedding -> buildKnnBody(queryEmbedding, callerRoles, candidateSize))
+                .thenApply(this::runSearch);
+
+        List<RankedHit> bm25Hits = join(bm25Future);
+        List<RankedHit> knnHits = join(knnFuture);
 
         return fuseWithRrf(bm25Hits, knnHits, topK);
+    }
+
+    // CompletableFuture.join()은 원래 예외를 CompletionException으로 감싸버리는데, 그러면 runSearch()가
+    // 던지는 IllegalStateException을 GlobalExceptionHandler가 더 이상 인식하지 못해 메시지 없는 500으로
+    // 뭉개진다. 원래 예외(RuntimeException)를 그대로 꺼내 다시 던져서 병렬화 이전과 동일한 예외 처리 경로를 유지한다.
+    private <T> T join(CompletableFuture<T> future) {
+        try {
+            return future.join();
+        } catch (CompletionException e) {
+            switch (e.getCause()) {
+                case RuntimeException re -> throw re;
+                case null, default -> throw e;
+            }
+        }
     }
 
     private Map<String, Object> buildBm25Body(String queryText, Set<String> callerRoles, int size) {
